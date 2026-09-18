@@ -9,9 +9,15 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseExe = Join-Path $repoRoot 'target\release\claude-code-usage-monitor.exe'
-$installRoot = Join-Path $env:LOCALAPPDATA 'AIUsageMonitor'
+# Codex Desktop is an MSIX-packaged process.  When this installer is invoked
+# from Codex, LOCALAPPDATA/APPDATA can be package-redirected into Codex's
+# LocalCache.  A desktop companion must live outside that package so Codex
+# updates and shutdowns cannot remove or own it.
+$realLocalAppData = Join-Path $env:USERPROFILE 'AppData\Local'
+$realRoamingAppData = Join-Path $env:USERPROFILE 'AppData\Roaming'
+$installRoot = Join-Path $realLocalAppData 'AIUsageMonitor'
 $installedExe = Join-Path $installRoot 'AIUsageMonitor.exe'
-$appDataRoot = Join-Path $env:APPDATA 'ClaudeCodeUsageMonitor'
+$appDataRoot = Join-Path $realRoamingAppData 'ClaudeCodeUsageMonitor'
 $themeRoot = Join-Path $appDataRoot 'themes'
 $themeSource = Join-Path $repoRoot 'src\themes\four-account-weekly-monitor.json'
 $themeTarget = Join-Path $themeRoot 'four-account-weekly-monitor-user.json'
