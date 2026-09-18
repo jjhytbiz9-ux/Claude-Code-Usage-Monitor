@@ -193,8 +193,21 @@ if ($NoStartup) {
     Start-ScheduledTask -TaskName $startupTaskName
 }
 
+$desktopShortcut = Join-Path `
+    ([Environment]::GetFolderPath('Desktop')) `
+    'AI 사용량 모니터.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($desktopShortcut)
+$shortcut.TargetPath = $installedExe
+$shortcut.WorkingDirectory = $installRoot
+$shortcut.IconLocation = "$installedExe,0"
+$shortcut.Description = 'AI 사용량, RAM, 드라이브 모니터 열기'
+$shortcut.Save()
+[Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+
 Write-Output "Installed: $installedExe"
 Write-Output "Settings:  $settingsPath"
 Write-Output "Profiles:  $profileRoot"
 Write-Output "Theme:     $themeTarget"
 Write-Output "Startup:   Scheduled task '$startupTaskName' (direct EXE action)"
+Write-Output "Shortcut:  $desktopShortcut"
