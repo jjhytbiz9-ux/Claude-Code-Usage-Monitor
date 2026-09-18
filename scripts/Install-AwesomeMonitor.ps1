@@ -149,6 +149,7 @@ $json = $settings | ConvertTo-Json -Depth 12
 [System.IO.File]::WriteAllText($settingsPath, $json, [System.Text.UTF8Encoding]::new($false))
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$startupTaskName = 'AI Usage Monitor'
 $startupShortcut = Join-Path `
     ([Environment]::GetFolderPath('Startup')) `
     'AI Usage Monitor.lnk'
@@ -156,20 +157,44 @@ Remove-ItemProperty `
     -Path $runKey `
     -Name 'AI Usage Monitor' `
     -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
 if ($NoStartup) {
-    Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask `
+        -TaskName $startupTaskName `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
 } else {
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($startupShortcut)
-    $shortcut.TargetPath = $installedExe
-    $shortcut.WorkingDirectory = $installRoot
-    $shortcut.Description = 'AI usage, RAM, and drive desktop monitor'
-    $shortcut.Save()
-    [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+    # Task Scheduler launches the EXE directly from its service, outside the
+    # Codex Desktop job object.  Do not wrap this in cmd.exe or `start`: that
+    # makes quoting fragile and was the source of the old missing-file popup.
+    $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction `
+        -Execute $installedExe `
+        -WorkingDirectory $installRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId $userId `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $taskSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew
+    Register-ScheduledTask `
+        -TaskName $startupTaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $taskSettings `
+        -Description 'Independent AI usage, RAM, and drive desktop monitor' `
+        -Force | Out-Null
+    Start-ScheduledTask -TaskName $startupTaskName
 }
 
 Write-Output "Installed: $installedExe"
 Write-Output "Settings:  $settingsPath"
 Write-Output "Profiles:  $profileRoot"
 Write-Output "Theme:     $themeTarget"
-Write-Output "Startup:   $startupShortcut"
+Write-Output "Startup:   Scheduled task '$startupTaskName' (direct EXE action)"

@@ -22,10 +22,11 @@ The settings file contains paths and labels only; OAuth credentials stay under
 
 The installer builds the release executable, saves the currently active Codex
 credential as the Codex 6t profile if that slot is empty, installs the widget,
-writes the four-account settings, and creates `AI Usage Monitor.lnk` in the
-current user's Startup folder. Explorer launches that shortcut at sign-in, so
-the monitor does not inherit the lifetime of whichever Codex or terminal ran
-the installer. The old `HKCU\...\Run` entry is removed during installation.
+writes the four-account settings, and registers the `AI Usage Monitor`
+scheduled task with a direct EXE action. Task Scheduler launches it at sign-in
+outside the Codex Desktop job object, so closing or updating Codex cannot end
+the monitor. The old Startup shortcut and `HKCU\...\Run` entry are removed
+during installation.
 The widget counts down the remaining allowance, so an account at 96% used is
 shown as 4% remaining. Codex shows its weekly reset, while each Claude card
 shows separate `5시간 갱신` and `전체 갱신` countdowns in `0일 0시간` form;
