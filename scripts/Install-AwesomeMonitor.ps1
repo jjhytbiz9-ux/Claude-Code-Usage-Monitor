@@ -141,13 +141,27 @@ $json = $settings | ConvertTo-Json -Depth 12
 [System.IO.File]::WriteAllText($settingsPath, $json, [System.Text.UTF8Encoding]::new($false))
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$startupShortcut = Join-Path `
+    ([Environment]::GetFolderPath('Startup')) `
+    'AI Usage Monitor.lnk'
+Remove-ItemProperty `
+    -Path $runKey `
+    -Name 'AI Usage Monitor' `
+    -ErrorAction SilentlyContinue
 if ($NoStartup) {
-    Remove-ItemProperty -Path $runKey -Name 'AI Usage Monitor' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
 } else {
-    New-ItemProperty -Path $runKey -Name 'AI Usage Monitor' -Value ('"{0}"' -f $installedExe) -PropertyType String -Force | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($startupShortcut)
+    $shortcut.TargetPath = $installedExe
+    $shortcut.WorkingDirectory = $installRoot
+    $shortcut.Description = 'AI usage, RAM, and drive desktop monitor'
+    $shortcut.Save()
+    [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
 }
 
 Write-Output "Installed: $installedExe"
 Write-Output "Settings:  $settingsPath"
 Write-Output "Profiles:  $profileRoot"
 Write-Output "Theme:     $themeTarget"
+Write-Output "Startup:   $startupShortcut"
