@@ -13,19 +13,21 @@ $releaseExe = Join-Path $repoRoot 'target\release\claude-code-usage-monitor.exe'
 # from Codex, LOCALAPPDATA/APPDATA can be package-redirected into Codex's
 # LocalCache.  A desktop companion must live outside that package so Codex
 # updates and shutdowns cannot remove or own it.
-$realRoamingAppData = Join-Path $env:USERPROFILE 'AppData\Roaming'
 # LOCALAPPDATA itself is virtualized when a packaged caller creates a shell
 # link.  Install under the user profile's Applications directory so the raw
 # .lnk target never points into OpenAI.Codex_*\LocalCache.
 $installRoot = Join-Path $env:USERPROFILE 'Applications\AIUsageMonitor'
 $installedExe = Join-Path $installRoot 'AIUsageMonitor.exe'
-$appDataRoot = Join-Path $realRoamingAppData 'ClaudeCodeUsageMonitor'
+$appDataRoot = Join-Path $installRoot 'Data'
+$launcherSource = Join-Path $PSScriptRoot 'Launch-AIUsageMonitor.vbs'
+$installedLauncher = Join-Path $installRoot 'Launch-AIUsageMonitor.vbs'
 $themeRoot = Join-Path $appDataRoot 'themes'
 $themeSource = Join-Path $repoRoot 'src\themes\four-account-weekly-monitor.json'
 $themeTarget = Join-Path $themeRoot 'four-account-weekly-monitor-user.json'
 $themeAssetSource = Join-Path $repoRoot 'src\themes\assets'
 $themeAssetRoot = Join-Path $themeRoot 'assets'
 $profileRoot = Join-Path $env:USERPROFILE '.ai-usage-accounts'
+$startupTaskName = 'AI Usage Monitor'
 
 $profiles = [ordered]@{
     Codex6t  = Join-Path $profileRoot 'codex\6t'
@@ -43,6 +45,20 @@ if (-not $SkipBuild) {
 if (-not (Test-Path -LiteralPath $releaseExe)) {
     throw "Release executable was not found: $releaseExe"
 }
+if (-not (Test-Path -LiteralPath $launcherSource)) {
+    throw "Monitor launcher was not found: $launcherSource"
+}
+
+$existingTask = Get-ScheduledTask `
+    -TaskName $startupTaskName `
+    -ErrorAction SilentlyContinue
+if ($existingTask -and $existingTask.State -eq 'Running') {
+    Stop-ScheduledTask -TaskName $startupTaskName
+    Start-Sleep -Milliseconds 500
+}
+Get-Process -Name 'AIUsageMonitor' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $installedExe } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 
 New-Item -ItemType Directory -Force -Path $installRoot, $appDataRoot, $themeRoot, $themeAssetRoot, $profileRoot | Out-Null
 foreach ($directory in $profiles.Values) {
@@ -66,6 +82,7 @@ if (-not $SkipCodexSnapshot) {
 }
 
 Copy-Item -LiteralPath $releaseExe -Destination $installedExe -Force
+Copy-Item -LiteralPath $launcherSource -Destination $installedLauncher -Force
 Copy-Item -LiteralPath $themeSource -Destination $themeTarget -Force
 Copy-Item -LiteralPath (Join-Path $themeAssetSource 'openai-mark.png') -Destination (Join-Path $themeAssetRoot 'openai-mark.png') -Force
 Copy-Item -LiteralPath (Join-Path $themeAssetSource 'claude-mark.png') -Destination (Join-Path $themeAssetRoot 'claude-mark.png') -Force
@@ -149,7 +166,6 @@ $json = $settings | ConvertTo-Json -Depth 12
 [System.IO.File]::WriteAllText($settingsPath, $json, [System.Text.UTF8Encoding]::new($false))
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$startupTaskName = 'AI Usage Monitor'
 $startupShortcut = Join-Path `
     ([Environment]::GetFolderPath('Startup')) `
     'AI Usage Monitor.lnk'
@@ -164,13 +180,13 @@ if ($NoStartup) {
         -Confirm:$false `
         -ErrorAction SilentlyContinue
 } else {
-    # Task Scheduler launches the EXE directly from its service, outside the
-    # Codex Desktop job object.  Do not wrap this in cmd.exe or `start`: that
-    # makes quoting fragile and was the source of the old missing-file popup.
+    # WScript supplies the non-virtualized data directory and waits for the
+    # monitor. Task Scheduler owns WScript outside the Codex Desktop job.
     $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
     $action = New-ScheduledTaskAction `
-        -Execute $installedExe `
-        -WorkingDirectory $installRoot
+        -Execute $wscript `
+        -Argument "`"$installedLauncher`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
     $principal = New-ScheduledTaskPrincipal `
         -UserId $userId `
@@ -198,7 +214,8 @@ $desktopShortcut = Join-Path `
     'AI 사용량 모니터.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($desktopShortcut)
-$shortcut.TargetPath = $installedExe
+$shortcut.TargetPath = (Join-Path $env:SystemRoot 'System32\wscript.exe')
+$shortcut.Arguments = "`"$installedLauncher`""
 $shortcut.WorkingDirectory = $installRoot
 $shortcut.IconLocation = "$installedExe,0"
 $shortcut.Description = 'AI 사용량, RAM, 드라이브 모니터 열기'
@@ -209,5 +226,5 @@ Write-Output "Installed: $installedExe"
 Write-Output "Settings:  $settingsPath"
 Write-Output "Profiles:  $profileRoot"
 Write-Output "Theme:     $themeTarget"
-Write-Output "Startup:   Scheduled task '$startupTaskName' (direct EXE action)"
+Write-Output "Startup:   Scheduled task '$startupTaskName' (WScript launcher)"
 Write-Output "Shortcut:  $desktopShortcut"

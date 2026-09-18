@@ -22,8 +22,9 @@ The settings file contains paths and labels only; OAuth credentials stay under
 
 The installer builds the release executable, saves the currently active Codex
 credential as the Codex 6t profile if that slot is empty, installs the widget,
-writes the four-account settings, and registers the `AI Usage Monitor`
-scheduled task with a direct EXE action. Task Scheduler launches it at sign-in
+writes the four-account settings under the install directory's `Data` folder,
+and registers the `AI Usage Monitor` scheduled task through a WScript launcher.
+The launcher supplies that non-virtualized data path and Task Scheduler owns it
 outside the Codex Desktop job object, so closing or updating Codex cannot end
 the monitor. The old Startup shortcut and `HKCU\...\Run` entry are removed
 during installation.

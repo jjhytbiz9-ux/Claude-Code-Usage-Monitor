@@ -214,6 +214,11 @@ pub struct UsageCache {
 }
 
 pub fn app_data_directory() -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("AI_USAGE_MONITOR_DATA_DIR") {
+        if !override_dir.is_empty() {
+            return PathBuf::from(override_dir);
+        }
+    }
     let root = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
