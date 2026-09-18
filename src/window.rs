@@ -15,15 +15,15 @@ use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, ReleaseCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    GetDoubleClickTime, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app_settings::{
-    self, load_settings, save_settings, LegacyPlacement, SettingsFile, POLL_15_MIN,
-    POLL_15_MIN_SECONDS, POLL_1_HOUR, POLL_1_HOUR_SECONDS, POLL_1_MIN, POLL_1_MIN_SECONDS,
-    POLL_5_MIN, POLL_5_MIN_SECONDS,
+    self, load_settings, save_settings, DesktopSurfaceOffset, LegacyPlacement, SettingsFile,
+    POLL_15_MIN, POLL_15_MIN_SECONDS, POLL_1_HOUR, POLL_1_HOUR_SECONDS, POLL_1_MIN,
+    POLL_1_MIN_SECONDS, POLL_5_MIN, POLL_5_MIN_SECONDS,
 };
 use crate::context_menu::{self, ContextMenuAction, ContextMenuItem, ContextMenuItemKind};
 use crate::diagnose;
@@ -122,6 +122,8 @@ struct AppState {
     tray_theme_uses_current_time: bool,
     mirror_hwnds: Vec<SendHwnd>,
     desktop_hwnds: Vec<Option<SendHwnd>>,
+    desktop_surface_offsets: HashMap<String, DesktopSurfaceOffset>,
+    desktop_drag: Option<DesktopSurfaceDrag>,
     mouse_action_overrides: HashMap<MouseActionOverrideKey, theme_engine::Expression>,
     hovered_mouse_layer: Option<(usize, String)>,
     pending_mouse_click: Option<PendingMouseClick>,
@@ -132,6 +134,15 @@ struct AppState {
 struct PendingMouseClick {
     surface_index: usize,
     object_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct DesktopSurfaceDrag {
+    surface_index: usize,
+    surface_id: String,
+    start_mouse_x: i32,
+    start_mouse_y: i32,
+    start_offset: DesktopSurfaceOffset,
 }
 
 #[derive(Clone, Debug)]
@@ -555,6 +566,7 @@ fn save_state_settings() {
             .active_theme_path
             .as_ref()
             .map(|path| path.to_string_lossy().to_string());
+        persisted.desktop_surface_offsets = s.desktop_surface_offsets.clone();
         // The dashboard process owns its dimensions, so leave the freshly
         // loaded values unchanged when monitor actions persist settings.
         if let Err(error) = save_settings(&persisted) {
@@ -1280,6 +1292,7 @@ fn apply_custom_theme(
         state.hovered_mouse_layer = None;
         state.pending_mouse_click = None;
         state.suppress_next_left_up = false;
+        state.desktop_drag = None;
         if path.is_some() {
             state.active_theme_path = path;
         }
@@ -1511,9 +1524,18 @@ unsafe extern "system" fn mirror_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_SETCURSOR if set_desktop_drag_cursor(hwnd) => LRESULT(1),
         WM_SETCURSOR if set_surface_cursor(hwnd) => LRESULT(1),
+        WM_LBUTTONDOWN => {
+            if begin_desktop_surface_drag(hwnd, lparam) {
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_MOUSEMOVE => {
-            update_mouse_hover(hwnd, lparam);
+            if !update_desktop_surface_drag(hwnd) {
+                update_mouse_hover(hwnd, lparam);
+            }
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
@@ -1521,6 +1543,9 @@ unsafe extern "system" fn mirror_wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if finish_desktop_surface_drag(hwnd) {
+                return LRESULT(0);
+            }
             let suppressed = {
                 let mut state = lock_state();
                 state.as_mut().is_some_and(|state| {
@@ -1534,6 +1559,10 @@ unsafe extern "system" fn mirror_wnd_proc(
                     schedule_or_dispatch_click(hwnd, surface, object);
                 }
             }
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            let _ = finish_desktop_surface_drag(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONDBLCLK => {
@@ -1850,6 +1879,8 @@ pub fn run() {
                 tray_theme_uses_current_time,
                 mirror_hwnds: Vec::new(),
                 desktop_hwnds: Vec::new(),
+                desktop_surface_offsets: settings.desktop_surface_offsets.clone(),
+                desktop_drag: None,
                 mouse_action_overrides: HashMap::new(),
                 hovered_mouse_layer: None,
                 pending_mouse_click: None,
@@ -1937,7 +1968,15 @@ pub fn run() {
 fn render_layered() {
     refresh_dpi();
     sync_custom_mirrors();
-    let (hwnd_val, active_theme, usage_data, runtime, mirror_hwnds, desktop_hwnds) = {
+    let (
+        hwnd_val,
+        active_theme,
+        usage_data,
+        runtime,
+        mirror_hwnds,
+        desktop_hwnds,
+        desktop_surface_offsets,
+    ) = {
         let state = lock_state();
         let Some(state) = state.as_ref() else {
             return;
@@ -1949,6 +1988,7 @@ fn render_layered() {
             theme_runtime_from_state(state),
             state.mirror_hwnds.clone(),
             state.desktop_hwnds.clone(),
+            state.desktop_surface_offsets.clone(),
         )
     };
 
@@ -2027,6 +2067,14 @@ fn render_layered() {
         );
         positioned.placement.offset_x = placement.offset_x;
         positioned.placement.offset_y = placement.offset_y;
+        if desktop_nested {
+            if let Some(offset) = desktop_surface_offsets.get(&surface.id) {
+                positioned.placement.offset_x =
+                    positioned.placement.offset_x.saturating_add(offset.x);
+                positioned.placement.offset_y =
+                    positioned.placement.offset_y.saturating_add(offset.y);
+            }
+        }
         position_custom_theme(target_hwnd, &positioned, scale);
         if desktop_nested {
             unsafe {
@@ -2429,6 +2477,7 @@ fn reload_external_settings(hwnd: HWND) {
         state.providers = settings.enabled_providers();
         state.usage_countdown = settings.usage_countdown;
         state.taskbar_index = settings.taskbar_index;
+        state.desktop_surface_offsets = settings.desktop_surface_offsets.clone();
         apply_language_to_state(state, language_override);
     }
     unsafe {

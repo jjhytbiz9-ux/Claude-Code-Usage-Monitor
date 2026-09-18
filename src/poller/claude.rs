@@ -22,7 +22,27 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 struct UsageResponse {
     five_hour: Option<UsageBucket>,
     seven_day: Option<UsageBucket>,
+    #[serde(default)]
+    limits: Vec<ScopedUsageLimit>,
     spend: Option<SpendResponse>,
+}
+
+#[derive(Deserialize)]
+struct ScopedUsageLimit {
+    kind: String,
+    percent: Option<f64>,
+    resets_at: Option<String>,
+    scope: Option<ScopedUsageScope>,
+}
+
+#[derive(Deserialize)]
+struct ScopedUsageScope {
+    model: Option<ScopedUsageModel>,
+}
+
+#[derive(Deserialize)]
+struct ScopedUsageModel {
+    display_name: Option<String>,
 }
 
 /// Paid credits that carry the account past its plan limits. Amounts are
@@ -88,6 +108,9 @@ pub(super) fn poll_claude_code() -> Result<UsageData, PollError> {
 
 /// Explicit profiles are pinned to one source, including when refresh fails.
 pub(super) fn poll_account(path: &Path) -> Result<UsageData, PollError> {
+    if let Some(org_id) = crate::accounts::claude_desktop_org_id(path) {
+        return poll_desktop_org(org_id, crate::accounts::claude_desktop_oauth_path(path));
+    }
     let source = CredentialSource::Windows(path.to_path_buf());
     let mut credentials = read_credentials_from_source(&source).ok_or(PollError::NoCredentials)?;
     if is_token_expired(credentials.expires_at) {
@@ -98,6 +121,57 @@ pub(super) fn poll_account(path: &Path) -> Result<UsageData, PollError> {
         }
     }
     fetch_usage_with_fallback(&credentials.access_token)
+}
+
+fn poll_desktop_org(org_id: &str, oauth_path: Option<PathBuf>) -> Result<UsageData, PollError> {
+    let masked_org = format!(
+        "{}...{}",
+        &org_id[..org_id.len().min(8)],
+        &org_id[org_id.len().saturating_sub(4)..]
+    );
+
+    if let Some(oauth_path) = oauth_path.filter(|path| path.is_file()) {
+        let source = CredentialSource::Windows(oauth_path);
+        if let Some(mut credentials) = read_credentials_from_source(&source) {
+            if is_token_expired(credentials.expires_at) {
+                cli_refresh_token(&source);
+                if let Some(refreshed) = read_credentials_from_source(&source) {
+                    credentials = refreshed;
+                }
+            }
+            if !is_token_expired(credentials.expires_at) {
+                if let Ok(usage) = fetch_usage_with_fallback(&credentials.access_token) {
+                    diagnose::log(format!(
+                        "using dedicated Claude OAuth usage for account {masked_org}"
+                    ));
+                    return Ok(usage);
+                }
+            }
+        }
+    }
+
+    if let Some(config_path) = claude_desktop::config_path() {
+        if let Some(token) = claude_desktop::read_token_for_org(&config_path, Some(org_id)) {
+            if !is_token_expired(token.expires_at) {
+                diagnose::log(format!(
+                    "using the Claude desktop app token cache for account {masked_org}"
+                ));
+                if let Ok(usage) = fetch_usage_with_fallback(&token.access_token) {
+                    return Ok(usage);
+                }
+                diagnose::log(format!(
+                    "Claude desktop token cannot read plan usage for account {masked_org}; using local plan history"
+                ));
+            }
+        }
+    }
+
+    let usage =
+        claude_desktop::read_usage_history_for_org(org_id).ok_or(PollError::NoCredentials)?;
+    diagnose::log(format!(
+        "using Claude desktop local plan history for account {masked_org}"
+    ));
+    Ok(usage)
 }
 
 pub(super) fn fetch_usage_with_fallback(token: &str) -> Result<UsageData, PollError> {
@@ -180,6 +254,25 @@ fn usage_from_response(response: UsageResponse) -> UsageData {
         data.weekly.percentage = bucket.utilization;
         data.weekly.resets_at = parse_iso8601(bucket.resets_at.as_deref());
     }
+
+    data.fable = response.limits.iter().find_map(|limit| {
+        let name = limit
+            .scope
+            .as_ref()?
+            .model
+            .as_ref()?
+            .display_name
+            .as_deref()?;
+        let percentage = limit.percent?;
+        (limit.kind == "weekly_scoped"
+            && name.to_ascii_lowercase().starts_with("fable")
+            && percentage.is_finite())
+        .then(|| crate::models::UsageSection {
+            available: true,
+            percentage: percentage.clamp(0.0, 100.0),
+            resets_at: parse_iso8601(limit.resets_at.as_deref()),
+        })
+    });
 
     data.credits = response
         .spend
@@ -870,6 +963,25 @@ mod tests {
             assert!(data.session.resets_at.is_none());
             assert!(!data.weekly.available);
         }
+    }
+
+    #[test]
+    fn fable_weekly_limit_is_selected_from_model_scoped_limits() {
+        let data = usage_from_json(
+            r#"{
+                "five_hour": {"utilization": 12.0, "resets_at": null},
+                "seven_day": {"utilization": 34.0, "resets_at": null},
+                "limits": [
+                    {"kind":"weekly_scoped","percent":67.0,"resets_at":"2026-09-20T00:00:00Z","scope":{"model":{"display_name":"Fable"}}},
+                    {"kind":"weekly_scoped","percent":88.0,"resets_at":null,"scope":{"model":{"display_name":"Opus"}}}
+                ]
+            }"#,
+        );
+
+        let fable = data.fable.expect("Fable should get its own weekly window");
+        assert!(fable.available);
+        assert_eq!(fable.percentage, 67.0);
+        assert!(fable.resets_at.is_some());
     }
 
     #[test]

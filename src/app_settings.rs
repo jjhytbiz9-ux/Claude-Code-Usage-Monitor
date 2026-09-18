@@ -1,5 +1,6 @@
 //! Shared, atomically persisted state used by the widget and studio processes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,12 @@ pub const POLL_15_MIN: u32 = POLL_15_MIN_SECONDS * 1_000;
 pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 // SetTimer clamps longer intervals to USER_TIMER_MAXIMUM (i32::MAX ms).
 pub const MAX_POLL_MINUTES: u32 = i32::MAX as u32 / POLL_1_MIN;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopSurfaceOffset {
+    pub x: i32,
+    pub y: i32,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
@@ -70,6 +77,10 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// User drag offsets from each desktop surface's theme-defined position.
+    /// Keys are stable surface ids so a theme refresh does not lose placement.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub desktop_surface_offsets: HashMap<String, DesktopSurfaceOffset>,
 }
 
 impl Default for SettingsFile {
@@ -94,6 +105,7 @@ impl Default for SettingsFile {
             active_theme_path: None,
             dashboard_width: None,
             dashboard_height: None,
+            desktop_surface_offsets: HashMap::new(),
         }
     }
 }
@@ -532,5 +544,28 @@ mod tests {
         invalid.normalize();
         assert_eq!(invalid.dashboard_width, None);
         assert_eq!(invalid.dashboard_height, None);
+    }
+
+    #[test]
+    fn desktop_surface_offsets_round_trip() {
+        let settings = decode_settings(
+            r#"{
+                "desktop_surface_offsets": {
+                    "codex-public": { "x": -120, "y": 36 }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.desktop_surface_offsets.get("codex-public"),
+            Some(&DesktopSurfaceOffset { x: -120, y: 36 })
+        );
+
+        let encoded = settings_json(&settings);
+        assert_eq!(
+            encoded["desktop_surface_offsets"]["codex-public"]["x"],
+            -120
+        );
+        assert_eq!(encoded["desktop_surface_offsets"]["codex-public"]["y"], 36);
     }
 }

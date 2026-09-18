@@ -303,7 +303,10 @@ pub(super) fn position_custom_theme_internal(hwnd: HWND, theme: &ThemeDocument, 
                     MapWindowPoints(None, Some(desktop.parent), &mut point);
                     let _ = SetWindowPos(
                         hwnd,
-                        Some(desktop.insert_after),
+                        // Desktop widgets must sit above DefView so their title bars
+                        // receive pointer input. They still remain children of the
+                        // desktop host, so ordinary application windows cover them.
+                        Some(HWND_TOP),
                         point[0].x,
                         point[0].y,
                         width,

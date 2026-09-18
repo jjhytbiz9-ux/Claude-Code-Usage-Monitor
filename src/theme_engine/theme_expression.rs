@@ -510,7 +510,7 @@ pub(super) fn format_usage_line(base: &str, context: &DataContext) -> Option<Str
         ))
         || !matches!(
             window,
-            "session" | "five_hour" | "weekly" | "monthly" | "credits"
+            "session" | "five_hour" | "weekly" | "monthly" | "fable" | "credits"
         )
     {
         return None;
@@ -530,6 +530,13 @@ pub(super) fn format_usage_line(base: &str, context: &DataContext) -> Option<Str
             && context.get(&format!("{provider}.available")).unwrap_or(0.0) == 0.0)
     {
         return Some("!".into());
+    }
+    if window == "fable"
+        && context
+            .get(&format!("{provider}.{window}.available"))
+            .is_some_and(|available| available == 0.0)
+    {
+        return Some("--".into());
     }
     let percentage = context
         .get(&format!("{provider}.{window}.{metric}"))

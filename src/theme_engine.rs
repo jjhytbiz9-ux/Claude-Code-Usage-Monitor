@@ -21,6 +21,7 @@ use crate::providers::{ProviderId, ProviderSet, PROVIDER_DESCRIPTORS};
 pub const THEME_SCHEMA_VERSION: u32 = 1;
 pub const CLASSIC_THEME_ID: &str = "classic-usage-widget";
 pub const COMPACT_FLUENT_QUAD_THEME_ID: &str = "compact-fluent-quad";
+pub const FOUR_ACCOUNT_THEME_ID: &str = "four-account-weekly-monitor";
 pub const MINECRAFT_THEME_ID: &str = "theme-minecraft";
 
 const BUILTIN_THEME_SOURCES: &[(&str, &str)] = &[
@@ -31,6 +32,10 @@ const BUILTIN_THEME_SOURCES: &[(&str, &str)] = &[
     (
         COMPACT_FLUENT_QUAD_THEME_ID,
         include_str!("themes/compact-fluent-quad.json"),
+    ),
+    (
+        FOUR_ACCOUNT_THEME_ID,
+        include_str!("themes/four-account-weekly-monitor.json"),
     ),
 ];
 
@@ -1496,6 +1501,15 @@ impl DataContext {
             &format!("{name}.monthly.available"),
             monthly.is_some() as u8 as f64,
         );
+        let fable = usage.and_then(|usage| usage.fable.as_ref());
+        let fable_percentage = fable.map(|value| value.percentage).unwrap_or(0.0);
+        self.insert(&format!("{name}.fable.percentage"), fable_percentage);
+        self.insert(&format!("{name}.fable.remaining"), 100.0 - fable_percentage);
+        self.insert(&format!("{name}.fable.display"), display(fable_percentage));
+        self.insert(
+            &format!("{name}.fable.available"),
+            fable.is_some() as u8 as f64,
+        );
         self.insert(&format!("{name}.available"), usage.is_some() as u8 as f64);
         // Carried over from an earlier poll: real figures, not current ones.
         self.insert(
@@ -1534,7 +1548,7 @@ impl DataContext {
         // leaves it reporting 0% while another allowance is spent.
         let headline = match credits {
             Some(credits) => credits.percentage,
-            None => five_hour.max(weekly),
+            None => five_hour.max(weekly).max(fable_percentage),
         };
         self.insert(&format!("{name}.headline.percentage"), headline);
         self.insert(&format!("{name}.headline.remaining"), 100.0 - headline);
@@ -1580,11 +1594,13 @@ impl DataContext {
         }
         let (monthly_unix, monthly_seconds) =
             reset_value(monthly.and_then(|value| value.resets_at));
+        let (fable_unix, fable_seconds) = reset_value(fable.and_then(|value| value.resets_at));
         for (window, unix, seconds) in [
             ("session", session_unix, session_seconds),
             ("five_hour", five_hour_unix, five_hour_seconds),
             ("weekly", weekly_unix, weekly_seconds),
             ("monthly", monthly_unix, monthly_seconds),
+            ("fable", fable_unix, fable_seconds),
         ] {
             self.insert(&format!("{name}.{window}.reset.unix"), unix);
             self.insert(&format!("{name}.{window}.reset.seconds"), seconds);

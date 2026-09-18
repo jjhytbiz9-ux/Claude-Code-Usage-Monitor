@@ -636,6 +636,34 @@ fn themes_report_when_they_need_live_clock_refreshes() {
 }
 
 #[test]
+fn four_account_monitor_keeps_reset_countdowns_ticking_between_polls() {
+    let theme: ThemeDocument =
+        serde_json::from_str(include_str!("../themes/four-account-weekly-monitor.json"))
+            .expect("the four-account monitor theme should parse");
+
+    assert!(theme.validate().is_empty(), "{:?}", theme.validate());
+    assert_eq!(theme.surfaces.len(), 4);
+    let expected_y = [50, 270, 490, 710];
+    for index in 0..theme.surfaces.len() {
+        let surface = &theme.surfaces[index];
+        assert_eq!(surface.placement.offset_x, -40);
+        assert_eq!(surface.placement.offset_y, expected_y[index]);
+        assert!(
+            surface
+                .children
+                .iter()
+                .any(|object| object.id.ends_with("-titlebar")),
+            "surface {index} should expose a title bar drag region"
+        );
+        assert_eq!(
+            theme.surface_current_time_refresh_interval(index),
+            Some(std::time::Duration::from_secs(60)),
+            "surface {index} should refresh its reset countdown every minute"
+        );
+    }
+}
+
+#[test]
 fn numeric_expressions_reject_string_results() {
     let context = DataContext::from_usage(None, &Canvas::default());
     assert_eq!(
@@ -701,6 +729,7 @@ fn usage_lines_handle_loading_errors_missing_resets_and_language() {
             weekly: crate::models::UsageSection::default(),
             weekly_label: None,
             monthly: None,
+            fable: None,
             credits: None,
             stale: false,
         },
@@ -876,6 +905,7 @@ fn reset_stats_and_duration_formats_are_available_to_every_provider() {
             weekly: crate::models::UsageSection::default(),
             weekly_label: None,
             monthly: None,
+            fable: None,
             credits: None,
             stale: false,
         },
@@ -942,6 +972,47 @@ fn opencode_monthly_window_is_available_to_templates_when_present() {
     assert_eq!(
         evaluate("claude.monthly.percentage", &context).unwrap(),
         0.0
+    );
+}
+
+#[test]
+fn claude_fable_window_is_available_and_respects_countdown_display() {
+    let usage = crate::models::AppUsageData::from_iter([(
+        ProviderId::Claude,
+        crate::models::UsageData {
+            fable: Some(crate::models::UsageSection {
+                available: true,
+                percentage: 67.0,
+                resets_at: None,
+            }),
+            ..Default::default()
+        },
+    )]);
+    let context = DataContext::from_usage_with_runtime(
+        Some(&usage),
+        &Canvas::default(),
+        ThemeRuntime::default().with_countdown(true),
+    );
+    assert_eq!(evaluate("claude.fable.percentage", &context).unwrap(), 67.0);
+    assert_eq!(evaluate("claude.fable.display", &context).unwrap(), 33.0);
+    assert_eq!(evaluate("claude.fable.available", &context).unwrap(), 1.0);
+    assert_eq!(
+        format_template("{claude.fable.display:usage_line}", &context),
+        "33%"
+    );
+
+    let no_fable = crate::models::AppUsageData::from_iter([(
+        ProviderId::Claude,
+        crate::models::UsageData::default(),
+    )]);
+    let absent = DataContext::from_usage_with_runtime(
+        Some(&no_fable),
+        &Canvas::default(),
+        ThemeRuntime::default().with_countdown(true),
+    );
+    assert_eq!(
+        format_template("{claude.fable.display:usage_line}", &absent),
+        "--"
     );
 }
 
@@ -1438,9 +1509,10 @@ fn starter_tray_icons_follow_enabled_providers() {
 
 #[test]
 fn built_in_themes_are_valid_and_cannot_be_saved_as_editable_themes() {
-    assert_eq!(BUILTIN_THEME_SOURCES.len(), 2);
+    assert_eq!(BUILTIN_THEME_SOURCES.len(), 3);
     assert_eq!(BUILTIN_THEME_SOURCES[0].0, CLASSIC_THEME_ID);
     assert_eq!(BUILTIN_THEME_SOURCES[1].0, COMPACT_FLUENT_QUAD_THEME_ID);
+    assert_eq!(BUILTIN_THEME_SOURCES[2].0, FOUR_ACCOUNT_THEME_ID);
     assert!(REMOVED_BUILTIN_THEME_IDS
         .iter()
         .all(|id| !is_builtin_theme_id(id)));

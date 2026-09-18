@@ -14,7 +14,10 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use crate::diagnose;
+use crate::models::{UsageData, UsageSection};
 
 const TOKEN_CACHE_KEY: &str = "oauth:tokenCache";
 const DPAPI_KEY_PREFIX: &[u8] = b"DPAPI";
@@ -35,11 +38,90 @@ pub(super) fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("Claude").join("config.json"))
 }
 
+fn usage_history_path() -> Option<PathBuf> {
+    Some(
+        dirs::config_dir()?
+            .join("Claude")
+            .join("plan-usage-history.json"),
+    )
+}
+
+#[derive(Deserialize)]
+struct PlanUsageHistory {
+    #[serde(default)]
+    samples: Vec<PlanUsageSample>,
+}
+
+#[derive(Deserialize)]
+struct PlanUsageSample {
+    t: i64,
+    org: String,
+    u: PlanUsage,
+}
+
+#[derive(Deserialize)]
+struct PlanUsage {
+    fh: f64,
+    sd: f64,
+}
+
+/// Claude Desktop records the same five-hour and seven-day percentages it
+/// renders in its UI. This is the safest fallback for desktop-only accounts:
+/// their cached `user:office` token is intentionally rejected by the OAuth
+/// usage endpoint, while this file remains account-scoped and read-only.
+pub(super) fn read_usage_history_for_org(org_id: &str) -> Option<UsageData> {
+    let path = usage_history_path()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            if diagnose::is_enabled() {
+                diagnose::log_error(
+                    &format!(
+                        "unable to read Claude desktop usage history at {}",
+                        path.display()
+                    ),
+                    error,
+                );
+            }
+            return None;
+        }
+    };
+    usage_history_from_str(&content, org_id)
+}
+
+fn usage_history_from_str(content: &str, org_id: &str) -> Option<UsageData> {
+    let history: PlanUsageHistory = serde_json::from_str(content).ok()?;
+    let latest = history
+        .samples
+        .into_iter()
+        .filter(|sample| sample.org == org_id)
+        .filter(|sample| sample.u.fh.is_finite() && sample.u.sd.is_finite())
+        .max_by_key(|sample| sample.t)?;
+
+    Some(UsageData {
+        session: UsageSection {
+            available: true,
+            percentage: latest.u.fh.clamp(0.0, 100.0),
+            resets_at: None,
+        },
+        weekly: UsageSection {
+            available: true,
+            percentage: latest.u.sd.clamp(0.0, 100.0),
+            resets_at: None,
+        },
+        ..Default::default()
+    })
+}
+
 fn local_state_path(config_path: &Path) -> PathBuf {
     config_path.with_file_name("Local State")
 }
 
 pub(super) fn read_token(config_path: &Path) -> Option<DesktopToken> {
+    read_token_for_org(config_path, None)
+}
+
+pub(super) fn read_token_for_org(config_path: &Path, org_id: Option<&str>) -> Option<DesktopToken> {
     let config = match std::fs::read_to_string(config_path) {
         Ok(config) => config,
         Err(error) => {
@@ -60,7 +142,7 @@ pub(super) fn read_token(config_path: &Path) -> Option<DesktopToken> {
     let key = os_crypt_key(&local_state_path(config_path))?;
     let plaintext = decrypt_os_crypt_value(&cache, &key)?;
     let plaintext = String::from_utf8(plaintext).ok()?;
-    let token = select_token(&plaintext);
+    let token = select_token_for_org(&plaintext, org_id);
     if token.is_none() {
         diagnose::log("Claude desktop token cache held no usable inference token");
     }
@@ -88,12 +170,20 @@ fn token_cache_value(config: &str) -> Option<String> {
 
 /// Picks the freshest entry that carries the inference scope, falling back to
 /// the freshest entry of any scope so a future key layout still resolves.
+#[cfg(test)]
 fn select_token(plaintext: &str) -> Option<DesktopToken> {
+    select_token_for_org(plaintext, None)
+}
+
+fn select_token_for_org(plaintext: &str, org_id: Option<&str>) -> Option<DesktopToken> {
     let json: serde_json::Value = serde_json::from_str(plaintext).ok()?;
     let entries = json.as_object()?;
 
     let mut best: Option<(bool, i64, DesktopToken)> = None;
     for (key, entry) in entries {
+        if org_id.is_some_and(|org_id| !key.split(':').any(|segment| segment == org_id)) {
+            continue;
+        }
         let Some(access_token) = entry.get("token").and_then(|value| value.as_str()) else {
             continue;
         };
@@ -466,6 +556,32 @@ mod tests {
     }
 
     #[test]
+    fn selects_tokens_for_one_desktop_org_without_crossing_orgs() {
+        let plaintext = r#"{
+            "acct:user-a|install-a:org-a:https://api.anthropic.com:user:inference": {
+                "token": "token-a", "expiresAt": 100
+            },
+            "acct:user-b|install-b:org-b:https://api.anthropic.com:user:inference": {
+                "token": "token-b", "expiresAt": 200
+            }
+        }"#;
+        assert_eq!(
+            select_token_for_org(plaintext, Some("org-a"))
+                .unwrap()
+                .access_token,
+            "token-a"
+        );
+        assert_eq!(
+            select_token_for_org(plaintext, Some("org-b"))
+                .unwrap()
+                .access_token,
+            "token-b"
+        );
+        assert!(select_token_for_org(plaintext, Some("missing")).is_none());
+        assert!(select_token_for_org(plaintext, Some("org")).is_none());
+    }
+
+    #[test]
     fn ignores_entries_without_a_usable_token() {
         assert!(select_token(r#"{"install:user:scope": {"expiresAt": 1}}"#).is_none());
         assert!(select_token(r#"{"install:user:scope": {"token": ""}}"#).is_none());
@@ -512,5 +628,39 @@ mod tests {
     fn watch_signature_reports_missing_config() {
         let signature = watch_signature(Path::new("C:/nonexistent/Claude/config.json"));
         assert!(signature.ends_with("|missing"), "{signature}");
+    }
+
+    #[test]
+    fn usage_history_selects_the_latest_sample_for_one_org() {
+        let history = r#"{
+            "version": 2,
+            "samples": [
+                {"t": 30, "org": "org-b", "u": {"fh": 88, "sd": 77}},
+                {"t": 10, "org": "org-a", "u": {"fh": 12, "sd": 34}},
+                {"t": 20, "org": "org-a", "u": {"fh": 56, "sd": 78}}
+            ]
+        }"#;
+
+        let usage = usage_history_from_str(history, "org-a").unwrap();
+        assert_eq!(usage.session.percentage, 56.0);
+        assert_eq!(usage.weekly.percentage, 78.0);
+        assert!(usage.session.available);
+        assert!(usage.weekly.available);
+    }
+
+    #[test]
+    fn usage_history_does_not_cross_orgs_and_clamps_percentages() {
+        let history = r#"{
+            "samples": [
+                {"t": 1, "org": "org-a", "u": {"fh": -5, "sd": 120}},
+                {"t": 2, "org": "org-b", "u": {"fh": 20, "sd": 30}}
+            ]
+        }"#;
+
+        let usage = usage_history_from_str(history, "org-a").unwrap();
+        assert_eq!(usage.session.percentage, 0.0);
+        assert_eq!(usage.weekly.percentage, 100.0);
+        assert!(usage_history_from_str(history, "org").is_none());
+        assert!(usage_history_from_str(history, "missing").is_none());
     }
 }

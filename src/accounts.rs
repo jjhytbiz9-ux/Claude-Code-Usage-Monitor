@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::ProviderId;
 
+const CLAUDE_DESKTOP_SOURCE_PREFIX: &str = "claude-desktop-org:";
+
+pub fn claude_desktop_org_id(path: &Path) -> Option<&str> {
+    path.to_str()?
+        .strip_prefix(CLAUDE_DESKTOP_SOURCE_PREFIX)
+        .and_then(|value| value.split('|').next())
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+pub fn claude_desktop_oauth_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_str()?.strip_prefix(CLAUDE_DESKTOP_SOURCE_PREFIX)?;
+    let (_, credentials_path) = value.split_once('|')?;
+    (!credentials_path.is_empty()).then(|| PathBuf::from(credentials_path))
+}
+
 /// Stable non-secret key for source paths and file metadata (not token contents).
 pub fn fingerprint(value: &str) -> String {
     let hash = value.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
@@ -14,12 +34,19 @@ pub fn fingerprint(value: &str) -> String {
 }
 
 pub fn file_signature(path: &Path) -> String {
-    let metadata = std::fs::metadata(path).ok();
+    let desktop_config = claude_desktop_org_id(path)
+        .and_then(|_| dirs::config_dir().map(|root| root.join("Claude").join("config.json")));
+    let metadata_path = desktop_config.as_deref().unwrap_or(path);
+    let metadata = std::fs::metadata(metadata_path).ok();
+    let oauth_metadata =
+        claude_desktop_oauth_path(path).and_then(|oauth_path| std::fs::metadata(oauth_path).ok());
     fingerprint(&format!(
-        "{}|{:?}|{:?}",
+        "{}|{:?}|{:?}|{:?}|{:?}",
         source_key(path),
         metadata.as_ref().map(|m| m.len()),
-        metadata.and_then(|m| m.modified().ok())
+        metadata.and_then(|m| m.modified().ok()),
+        oauth_metadata.as_ref().map(|m| m.len()),
+        oauth_metadata.and_then(|m| m.modified().ok())
     ))
 }
 
@@ -54,6 +81,7 @@ pub struct AccountProfile {
     pub name: String,
     pub config_dir: String,
     pub credentials_path: String,
+    pub desktop_org_id: String,
     pub enabled: bool,
 }
 
@@ -64,6 +92,7 @@ impl Default for AccountProfile {
             name: "Default".into(),
             config_dir: String::new(),
             credentials_path: String::new(),
+            desktop_org_id: String::new(),
             enabled: true,
         }
     }
@@ -218,9 +247,46 @@ impl AccountProfile {
         self.id == other.id
             && self.config_dir == other.config_dir
             && self.credentials_path == other.credentials_path
+            && self.desktop_org_id == other.desktop_org_id
     }
 
     pub fn credential_path(&self, provider: ProviderId) -> Result<Option<PathBuf>, String> {
+        if provider == ProviderId::Claude && !self.desktop_org_id.trim().is_empty() {
+            let org_id = self.desktop_org_id.trim();
+            if !org_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(
+                    "Claude Desktop organization ID may contain only letters, numbers, and hyphens"
+                        .into(),
+                );
+            }
+            let oauth_path = if !self.credentials_path.trim().is_empty() {
+                Some(
+                    expand_path(Path::new(self.credentials_path.trim())).ok_or_else(|| {
+                        "Use an absolute credentials file path or ~/path".to_string()
+                    })?,
+                )
+            } else if !self.config_dir.trim().is_empty() {
+                Some(
+                    expand_path(Path::new(self.config_dir.trim()))
+                        .ok_or_else(|| {
+                            "Use an absolute account directory path or ~/path".to_string()
+                        })?
+                        .join(".credentials.json"),
+                )
+            } else {
+                None
+            };
+            let suffix = oauth_path
+                .as_ref()
+                .map(|path| format!("|{}", path.display()))
+                .unwrap_or_default();
+            return Ok(Some(PathBuf::from(format!(
+                "{CLAUDE_DESKTOP_SOURCE_PREFIX}{org_id}{suffix}"
+            ))));
+        }
         if !self.credentials_path.trim().is_empty() {
             return expand_path(Path::new(self.credentials_path.trim()))
                 .map(Some)
@@ -326,6 +392,35 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn claude_desktop_accounts_have_stable_non_secret_sources() {
+        let profile = AccountProfile {
+            config_dir: "C:\\profiles\\claude-6t".into(),
+            desktop_org_id: "6e4be185-eca5-41c5-a733-b9c5a9afb72d".into(),
+            ..Default::default()
+        };
+        let path = profile
+            .credential_path(ProviderId::Claude)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claude_desktop_org_id(&path),
+            Some("6e4be185-eca5-41c5-a733-b9c5a9afb72d")
+        );
+        assert_eq!(
+            claude_desktop_oauth_path(&path),
+            Some(PathBuf::from("C:\\profiles\\claude-6t\\.credentials.json"))
+        );
+        let desktop_only = AccountProfile {
+            desktop_org_id: profile.desktop_org_id.clone(),
+            ..Default::default()
+        };
+        assert!(desktop_only
+            .credential_path(ProviderId::Codex)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

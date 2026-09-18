@@ -65,6 +65,10 @@ pub struct UsageData {
     /// Kept separate from `weekly` so themes can choose how to display it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly: Option<UsageSection>,
+    /// Optional model-scoped weekly allowance. Claude currently exposes this
+    /// as the separate Fable weekly window in `/api/oauth/usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable: Option<UsageSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsSection>,
     /// True when this reading was carried over from an earlier poll because

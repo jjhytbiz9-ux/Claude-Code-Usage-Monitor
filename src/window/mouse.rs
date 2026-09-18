@@ -24,6 +24,148 @@ pub(super) fn mouse_client_point(lparam: LPARAM) -> (f64, f64) {
     (x, y)
 }
 
+fn desktop_drag_target_at(hwnd: HWND, lparam: LPARAM) -> Option<(usize, String, f64)> {
+    let state = lock_state();
+    let state = state.as_ref()?;
+    let surface_index = surface_index_for_window(state, hwnd)?;
+    let theme = effective_theme_from_state(state)?;
+    let surface = theme.surfaces.get(surface_index)?;
+    if surface
+        .placement
+        .nest
+        .resolve(surface.placement.reference.region)
+        != SurfaceNest::Desktop
+    {
+        return None;
+    }
+    let titlebar_index = surface.children.iter().position(|object| {
+        object.id.ends_with("-titlebar") || object.name.eq_ignore_ascii_case("title bar")
+    })?;
+    let scale = theme_surface_scale(&theme, surface_index).max(0.01);
+    let runtime = theme_runtime_for_surface(&theme, surface_index, theme_runtime_from_state(state));
+    let (x, y, width, height) = theme_engine::resolve_object_bounds_with_runtime(
+        &theme,
+        surface_index,
+        titlebar_index,
+        state.data.as_ref(),
+        runtime,
+    )?;
+    let (client_x, client_y) = mouse_client_point(lparam);
+    let logical_x = client_x / scale;
+    let logical_y = client_y / scale;
+    (logical_x >= x && logical_x < x + width && logical_y >= y && logical_y < y + height)
+        .then(|| (surface_index, surface.id.clone(), scale))
+}
+
+pub(super) unsafe fn begin_desktop_surface_drag(hwnd: HWND, lparam: LPARAM) -> bool {
+    let Some((surface_index, surface_id, _)) = desktop_drag_target_at(hwnd, lparam) else {
+        return false;
+    };
+    let mut cursor = POINT::default();
+    if GetPhysicalCursorPos(&mut cursor).is_err() {
+        return false;
+    }
+    {
+        let mut state = lock_state();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        let start_offset = state
+            .desktop_surface_offsets
+            .get(&surface_id)
+            .copied()
+            .unwrap_or_default();
+        state.desktop_drag = Some(DesktopSurfaceDrag {
+            surface_index,
+            surface_id,
+            start_mouse_x: cursor.x,
+            start_mouse_y: cursor.y,
+            start_offset,
+        });
+        state.pending_mouse_click = None;
+    }
+    let _ = SetCapture(hwnd);
+    true
+}
+
+pub(super) unsafe fn update_desktop_surface_drag(hwnd: HWND) -> bool {
+    let mut cursor = POINT::default();
+    if GetPhysicalCursorPos(&mut cursor).is_err() {
+        return false;
+    }
+    let moved = {
+        let mut state = lock_state();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        let Some(drag) = state.desktop_drag.clone() else {
+            return false;
+        };
+        if surface_index_for_window(state, hwnd) != Some(drag.surface_index) {
+            return false;
+        }
+        let Some(theme) = effective_theme_from_state(state) else {
+            return false;
+        };
+        let scale = theme_surface_scale(&theme, drag.surface_index).max(0.01);
+        let x = drag
+            .start_offset
+            .x
+            .saturating_add(((cursor.x - drag.start_mouse_x) as f64 / scale).round() as i32);
+        let y = drag
+            .start_offset
+            .y
+            .saturating_add(((cursor.y - drag.start_mouse_y) as f64 / scale).round() as i32);
+        state
+            .desktop_surface_offsets
+            .insert(drag.surface_id, DesktopSurfaceOffset { x, y });
+        true
+    };
+    if moved {
+        render_layered();
+    }
+    moved
+}
+
+pub(super) unsafe fn finish_desktop_surface_drag(hwnd: HWND) -> bool {
+    let finished = {
+        let mut state = lock_state();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        let Some(drag) = state.desktop_drag.as_ref() else {
+            return false;
+        };
+        if surface_index_for_window(state, hwnd) != Some(drag.surface_index) {
+            return false;
+        }
+        state.desktop_drag.take();
+        true
+    };
+    if finished {
+        let _ = ReleaseCapture();
+        save_state_settings();
+        render_layered();
+    }
+    finished
+}
+
+pub(super) unsafe fn set_desktop_drag_cursor(hwnd: HWND) -> bool {
+    let mut point = POINT::default();
+    if GetCursorPos(&mut point).is_err() {
+        return false;
+    }
+    let mut client = [point];
+    MapWindowPoints(None, Some(hwnd), &mut client);
+    let packed = ((client[0].y as u32 & 0xffff) << 16) | (client[0].x as u32 & 0xffff);
+    if desktop_drag_target_at(hwnd, LPARAM(packed as isize)).is_none() {
+        return false;
+    }
+    let cursor = LoadCursorW(None, IDC_SIZEALL).unwrap_or_default();
+    SetCursor(Some(cursor));
+    true
+}
+
 pub(super) fn mouse_target_at(hwnd: HWND, lparam: LPARAM) -> Option<(usize, String)> {
     let state = lock_state();
     let state = state.as_ref()?;
