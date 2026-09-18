@@ -642,12 +642,26 @@ fn four_account_monitor_keeps_reset_countdowns_ticking_between_polls() {
             .expect("the four-account monitor theme should parse");
 
     assert!(theme.validate().is_empty(), "{:?}", theme.validate());
-    assert_eq!(theme.surfaces.len(), 4);
-    let expected_y = [50, 270, 490, 710];
-    for index in 0..theme.surfaces.len() {
+    assert_eq!(theme.surfaces.len(), 6);
+    let expected_positions = [
+        (-40, 50),
+        (-40, 270),
+        (-40, 490),
+        (-40, 710),
+        (-470, 50),
+        (-470, 270),
+    ];
+    for (index, expected_position) in expected_positions.into_iter().enumerate() {
         let surface = &theme.surfaces[index];
-        assert_eq!(surface.placement.offset_x, -40);
-        assert_eq!(surface.placement.offset_y, expected_y[index]);
+        let expected_width = match surface.id.as_str() {
+            "system-status" | "drive-status" => 336.0,
+            _ => 420.0,
+        };
+        assert_eq!(surface.width.0, expected_width.to_string());
+        assert_eq!(
+            (surface.placement.offset_x, surface.placement.offset_y),
+            expected_position
+        );
         assert!(
             surface
                 .children
@@ -655,12 +669,144 @@ fn four_account_monitor_keeps_reset_countdowns_ticking_between_polls() {
                 .any(|object| object.id.ends_with("-titlebar")),
             "surface {index} should expose a title bar drag region"
         );
+        let expected_interval = match surface.id.as_str() {
+            "system-status" => 2,
+            "drive-status" => 30,
+            _ => 60,
+        };
         assert_eq!(
             theme.surface_current_time_refresh_interval(index),
-            Some(std::time::Duration::from_secs(60)),
-            "surface {index} should refresh its reset countdown every minute"
+            Some(std::time::Duration::from_secs(expected_interval)),
+            "surface {index} should refresh on its intended cadence"
         );
     }
+}
+
+#[test]
+fn four_account_monitor_shows_clear_when_ai_quota_rounds_to_zero() {
+    let theme: ThemeDocument =
+        serde_json::from_str(include_str!("../themes/four-account-weekly-monitor.json"))
+            .expect("the four-account monitor theme should parse");
+    let pairs = [
+        (
+            "cp-7d-value",
+            "cp-7d-clear",
+            "accounts.codex.default.weekly",
+        ),
+        (
+            "cs-7d-value",
+            "cs-7d-clear",
+            "accounts.codex.account_1.weekly",
+        ),
+        (
+            "clp-5h-value",
+            "clp-5h-clear",
+            "accounts.claude.account_1.five_hour",
+        ),
+        (
+            "clp-7d-value",
+            "clp-7d-clear",
+            "accounts.claude.account_1.weekly",
+        ),
+        (
+            "clp-fable-value",
+            "clp-fable-clear",
+            "accounts.claude.account_1.fable",
+        ),
+        (
+            "cls-5h-value",
+            "cls-5h-clear",
+            "accounts.claude.default.five_hour",
+        ),
+        (
+            "cls-7d-value",
+            "cls-7d-clear",
+            "accounts.claude.default.weekly",
+        ),
+        (
+            "cls-fable-value",
+            "cls-fable-clear",
+            "accounts.claude.default.fable",
+        ),
+    ];
+
+    for (value_id, clear_id, key) in pairs {
+        let value = theme
+            .surfaces
+            .iter()
+            .flat_map(|surface| &surface.children)
+            .find(|object| object.id == value_id)
+            .unwrap_or_else(|| panic!("missing value layer {value_id}"));
+        let clear = theme
+            .surfaces
+            .iter()
+            .flat_map(|surface| &surface.children)
+            .find(|object| object.id == clear_id)
+            .unwrap_or_else(|| panic!("missing CLEAR layer {clear_id}"));
+        let SceneContent::Text { template, .. } = &clear.content else {
+            panic!("{clear_id} should be a text layer");
+        };
+        assert_eq!(template, "CLEAR");
+
+        let mut context = DataContext::from_usage(None, &Canvas::default());
+        context.insert(&format!("{key}.available"), 1.0);
+        context.insert(&format!("{key}.display"), 0.49);
+        assert_eq!(
+            evaluate(&value.render.0, &context).unwrap(),
+            0.0,
+            "{value_id}"
+        );
+        assert_eq!(
+            evaluate(&clear.render.0, &context).unwrap(),
+            1.0,
+            "{clear_id}"
+        );
+
+        context.insert(&format!("{key}.display"), 0.5);
+        assert_eq!(
+            evaluate(&value.render.0, &context).unwrap(),
+            1.0,
+            "{value_id}"
+        );
+        assert_eq!(
+            evaluate(&clear.render.0, &context).unwrap(),
+            0.0,
+            "{clear_id}"
+        );
+
+        context.insert(&format!("{key}.available"), 0.0);
+        assert_eq!(
+            evaluate(&value.render.0, &context).unwrap(),
+            0.0,
+            "{value_id}"
+        );
+        assert_eq!(
+            evaluate(&clear.render.0, &context).unwrap(),
+            0.0,
+            "{clear_id}"
+        );
+    }
+}
+
+#[test]
+fn system_metrics_are_available_to_theme_expressions() {
+    let context = DataContext::from_usage(None, &Canvas::default());
+    assert_eq!(context.get("system.ram.available"), Some(1.0));
+    assert!(context.get("system.ram.total_gb").unwrap_or_default() > 0.0);
+    assert!(context.get("system.ram.process.count").unwrap_or_default() > 0.0);
+    assert_eq!(context.get("system.ram.process.1.available"), Some(1.0));
+    assert!(
+        context
+            .get("system.ram.process.1.memory_mb")
+            .unwrap_or_default()
+            > 0.0
+    );
+    assert!(!context
+        .get_string("system.ram.process.1.name")
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(context.get("system.drive.c.available"), Some(1.0));
+    assert!(context.get("system.drive.c.total_gb").unwrap_or_default() > 0.0);
 }
 
 #[test]

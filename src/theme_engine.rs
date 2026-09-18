@@ -1322,6 +1322,7 @@ impl DataContext {
         context.insert("app.version.minor", version_parts.next().unwrap_or(0.0));
         context.insert("app.version.patch", version_parts.next().unwrap_or(0.0));
         context.insert("system.dark", crate::theme::is_dark_mode() as u8 as f64);
+        context.insert_system_metrics(&crate::system_metrics::snapshot());
         context.insert("data.poll_ok", runtime.poll_ok as u8 as f64);
         context.insert("data.has_error", runtime.has_error as u8 as f64);
         context.insert(
@@ -1432,6 +1433,102 @@ impl DataContext {
             context.insert_provider("active", None, false, runtime.countdown);
         }
         context
+    }
+
+    fn insert_system_metrics(&mut self, metrics: &crate::system_metrics::SystemMetrics) {
+        let memory = &metrics.memory;
+        self.insert("system.ram.available", memory.available as u8 as f64);
+        self.insert("system.ram.total_bytes", memory.total_bytes as f64);
+        self.insert("system.ram.used_bytes", memory.used_bytes as f64);
+        self.insert("system.ram.free_bytes", memory.free_bytes as f64);
+        self.insert("system.ram.total_gb", memory.total_gib());
+        self.insert("system.ram.used_gb", memory.used_gib());
+        self.insert("system.ram.free_gb", memory.free_gib());
+        self.insert("system.ram.used_percent", memory.used_percent());
+        self.insert("system.ram.free_percent", memory.free_percent());
+        self.insert(
+            "system.ram.process.count",
+            memory.top_processes.len() as f64,
+        );
+        let largest_process = memory
+            .top_processes
+            .first()
+            .map(|process| process.memory_bytes)
+            .unwrap_or_default();
+        for index in 1..=5 {
+            let key = format!("system.ram.process.{index}");
+            let process = memory.top_processes.get(index - 1);
+            self.insert(&format!("{key}.available"), process.is_some() as u8 as f64);
+            self.insert_string(
+                &format!("{key}.name"),
+                process.map(|process| process.name.as_str()).unwrap_or(""),
+            );
+            self.insert_string(
+                &format!("{key}.display"),
+                process
+                    .map(crate::system_metrics::ProcessMemoryMetrics::display_memory)
+                    .unwrap_or_default(),
+            );
+            let memory_bytes = process
+                .map(|process| process.memory_bytes)
+                .unwrap_or_default();
+            self.insert(&format!("{key}.memory_bytes"), memory_bytes as f64);
+            self.insert(
+                &format!("{key}.memory_mb"),
+                process
+                    .map(|process| process.memory_mib())
+                    .unwrap_or_default(),
+            );
+            self.insert(
+                &format!("{key}.memory_gb"),
+                process
+                    .map(|process| process.memory_gib())
+                    .unwrap_or_default(),
+            );
+            self.insert(
+                &format!("{key}.percent_total"),
+                crate::system_metrics::percentage(memory_bytes, memory.total_bytes),
+            );
+            self.insert(
+                &format!("{key}.relative"),
+                crate::system_metrics::percentage(memory_bytes, largest_process),
+            );
+        }
+
+        self.insert("system.drive.count", metrics.drives.len() as f64);
+        for letter in 'a'..='z' {
+            let key = format!("system.drive.{letter}");
+            self.insert(&format!("{key}.available"), 0.0);
+            self.insert_string(
+                &format!("{key}.label"),
+                format!("{}:", letter.to_ascii_uppercase()),
+            );
+            for field in [
+                "total_bytes",
+                "used_bytes",
+                "free_bytes",
+                "total_gb",
+                "used_gb",
+                "free_gb",
+                "used_percent",
+                "free_percent",
+            ] {
+                self.insert(&format!("{key}.{field}"), 0.0);
+            }
+        }
+        for drive in &metrics.drives {
+            let key = format!("system.drive.{}", drive.key);
+            self.insert(&format!("{key}.available"), 1.0);
+            self.insert_string(&format!("{key}.label"), &drive.label);
+            self.insert(&format!("{key}.total_bytes"), drive.total_bytes as f64);
+            self.insert(&format!("{key}.used_bytes"), drive.used_bytes as f64);
+            self.insert(&format!("{key}.free_bytes"), drive.free_bytes as f64);
+            self.insert(&format!("{key}.total_gb"), drive.total_gib());
+            self.insert(&format!("{key}.used_gb"), drive.used_gib());
+            self.insert(&format!("{key}.free_gb"), drive.free_gib());
+            self.insert(&format!("{key}.used_percent"), drive.used_percent());
+            self.insert(&format!("{key}.free_percent"), drive.free_percent());
+        }
     }
 
     fn insert_provider(
@@ -2281,15 +2378,21 @@ fn current_time_refresh_interval_for(value: &impl Serialize) -> Option<Duration>
     let source = serde_json::to_string(value).ok()?.to_ascii_lowercase();
     let uses_clock =
         source.contains("time.now") || source.contains("time.local") || source.contains("time.utc");
-    if !uses_clock {
-        return None;
-    }
-
-    let needs_seconds = source.contains("time.now.milliseconds")
-        || source.contains("time.local.second")
-        || source.contains("time.utc.second")
-        || unix_clock_requires_second_refresh(&source);
-    Some(Duration::from_secs(if needs_seconds { 1 } else { 60 }))
+    let clock_interval = uses_clock.then(|| {
+        let needs_seconds = source.contains("time.now.milliseconds")
+            || source.contains("time.local.second")
+            || source.contains("time.utc.second")
+            || unix_clock_requires_second_refresh(&source);
+        Duration::from_secs(if needs_seconds { 1 } else { 60 })
+    });
+    let metrics_interval = if source.contains("system.ram.") {
+        Some(crate::system_metrics::MEMORY_REFRESH_INTERVAL)
+    } else if source.contains("system.drive.") {
+        Some(crate::system_metrics::DRIVE_REFRESH_INTERVAL)
+    } else {
+        None
+    };
+    clock_interval.into_iter().chain(metrics_interval).min()
 }
 
 fn unix_clock_requires_second_refresh(source: &str) -> bool {

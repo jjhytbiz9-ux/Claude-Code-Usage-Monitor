@@ -30,15 +30,27 @@ Fable shares the overall weekly reset. When the provider does not expose a
 timestamp, the corresponding row shows `—` instead of inventing a time. Once a
 reset timestamp has been captured, its countdown is recalculated from the local
 clock every minute even if that account's usage percentage remains at its last
-known value after switching.
+known value after switching. An available allowance that rounds to `0%` is
+shown as `CLEAR` instead of a zero.
 
 ## Desktop layout
 
-The four accounts render as independent 420×210 Windows 95-style cards in a
-2×2 grid on display 3. They are hosted by Explorer's desktop layer instead of
-the taskbar, so they stay out of both the taskbar and Alt+Tab and appear with
-the desktop when other windows are cleared. This mirrors Memo95's quiet
-desktop-widget behavior while keeping the usage monitor read-only.
+The four accounts render as independent 420×210 Windows 95-style cards in one
+vertical column on display 3. Separate, narrower 336×210 RAM and drive cards
+form a second column to the left. All six cards are hosted by Explorer's desktop
+layer instead of the taskbar, stay out of Alt+Tab, and can be dragged
+independently by their title bars. This mirrors Memo95's quiet desktop-widget
+behavior while keeping
+the usage monitor read-only.
+
+The RAM card refreshes every two seconds. It shows overall physical-memory use
+and the five executable names using the most memory, aggregating multiple
+processes with the same name and displaying each total in MB or GB. Generic
+`node.exe` helpers are omitted from the ranking because a single `node` row
+otherwise combines unrelated Codex, Claude, MCP, and Adobe runtimes; their
+memory remains included in the overall RAM percentage. The drive card refreshes
+every thirty seconds and shows C: and D: as remaining percentage and remaining
+GiB, with warning colours below 15% free and a critical colour below 5% free.
 
 Each Codex card intentionally renders only the remaining weekly allowance; the
 five-hour window is not part of the Codex layout.
