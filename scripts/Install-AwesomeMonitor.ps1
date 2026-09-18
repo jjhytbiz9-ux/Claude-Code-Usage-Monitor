@@ -13,9 +13,11 @@ $releaseExe = Join-Path $repoRoot 'target\release\claude-code-usage-monitor.exe'
 # from Codex, LOCALAPPDATA/APPDATA can be package-redirected into Codex's
 # LocalCache.  A desktop companion must live outside that package so Codex
 # updates and shutdowns cannot remove or own it.
-$realLocalAppData = Join-Path $env:USERPROFILE 'AppData\Local'
 $realRoamingAppData = Join-Path $env:USERPROFILE 'AppData\Roaming'
-$installRoot = Join-Path $realLocalAppData 'AIUsageMonitor'
+# LOCALAPPDATA itself is virtualized when a packaged caller creates a shell
+# link.  Install under the user profile's Applications directory so the raw
+# .lnk target never points into OpenAI.Codex_*\LocalCache.
+$installRoot = Join-Path $env:USERPROFILE 'Applications\AIUsageMonitor'
 $installedExe = Join-Path $installRoot 'AIUsageMonitor.exe'
 $appDataRoot = Join-Path $realRoamingAppData 'ClaudeCodeUsageMonitor'
 $themeRoot = Join-Path $appDataRoot 'themes'

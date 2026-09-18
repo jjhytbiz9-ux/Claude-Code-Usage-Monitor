@@ -12,4 +12,4 @@
 
 앞으로 이 모니터의 코드·테마·설치 스크립트는 위 로컬 정본에서 수정한다. `C:\Users\user\Downloads\AI-Usage-Monitor`를 다시 만들거나 중복 clone하지 않는다.
 
-로그인 토큰과 계정 프로필은 저장소 밖의 `C:\Users\user\.ai-usage-accounts` 등에 보관하며 Git에 추가하지 않는다. 설치본과 사용자 설정은 각각 `%LOCALAPPDATA%\AIUsageMonitor`, `%APPDATA%\ClaudeCodeUsageMonitor`에 둔다.
+로그인 토큰과 계정 프로필은 저장소 밖의 `C:\Users\user\.ai-usage-accounts` 등에 보관하며 Git에 추가하지 않는다. 설치본은 Codex 패키지 가상화 바깥인 `%USERPROFILE%\Applications\AIUsageMonitor`, 사용자 설정은 `%APPDATA%\ClaudeCodeUsageMonitor`에 둔다.
